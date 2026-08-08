@@ -41,14 +41,13 @@ function changeColor(n) {
   return "text-slate-400";
 }
 
-function authHeaders() {
-  const token = import.meta.env.VITE_ACCESS_TOKEN;
+function authHeaders(token) {
   return token ? { "x-access-token": token } : {};
 }
 
-async function loadFromDB() {
+async function loadFromDB(token) {
   try {
-    const res = await fetch("/api/portfolio", { headers: authHeaders() });
+    const res = await fetch("/api/portfolio", { headers: authHeaders(token) });
     if (!res.ok) return { data: null, ok: false };
     const json = await res.json();
     return { data: json.data, ok: true };
@@ -57,11 +56,11 @@ async function loadFromDB() {
   }
 }
 
-async function saveToDB(data) {
+async function saveToDB(data, token) {
   try {
     const res = await fetch("/api/portfolio", {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...authHeaders() },
+      headers: { "Content-Type": "application/json", ...authHeaders(token) },
       body: JSON.stringify(data),
     });
     return res.ok;
@@ -69,6 +68,21 @@ async function saveToDB(data) {
     return false;
   }
 }
+
+const DEMO_DATA = {
+  accounts: ["계좌1", "계좌2"],
+  holdings: [
+    { id: "s1", name: "삼성전자", ticker: "005930", market: "코스피", buyType: "현금", account: "계좌1", qty: 20, avgPrice: 66000, currentPrice: 71000, prevClose: 70200 },
+    { id: "s2", name: "SK하이닉스", ticker: "000660", market: "코스피", buyType: "신용", account: "계좌1", qty: 2, avgPrice: 130000, currentPrice: 188000, prevClose: 179000 },
+    { id: "s3", name: "Apple", ticker: "AAPL", market: "해외상장", buyType: "현금", account: "계좌2", qty: 10, avgPrice: 200, currentPrice: 215, prevClose: 213 },
+    { id: "s4", name: "엔비디아", ticker: "NVDA", market: "해외상장", buyType: "현금", account: "계좌2", qty: 10, avgPrice: 90, currentPrice: 118, prevClose: 117 },
+    { id: "s5", name: "비트코인", ticker: "BTC-USD", market: "코인", buyType: "현금", account: "계좌1", qty: 0.04, avgPrice: 82000000, currentPrice: 83000000, prevClose: 84000000 },
+  ],
+  cashMap: { "계좌1": 2000000, "계좌2": 1200000 },
+  otherMap: { "계좌1": 7000000, "계좌2": 0 },
+};
+
+const OWNER_TOKEN_KEY = "portfolio-owner-token";
 
 async function fetchQuote(symbol) {
   // 1순위: 이 앱과 함께 배포된 Vercel 서버리스 프록시 (/api/quote).
@@ -123,6 +137,12 @@ export default function PortfolioTracker() {
   const [saveStatus, setSaveStatus] = useState("");
   const [storageBroken, setStorageBroken] = useState(false);
   const [newAccountName, setNewAccountName] = useState("");
+  const [mode, setMode] = useState("demo"); // "demo" | "owner"
+  const [token, setToken] = useState(null);
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [loginInput, setLoginInput] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loggingIn, setLoggingIn] = useState(false);
 
   const [form, setForm] = useState({
     name: "",
@@ -134,27 +154,43 @@ export default function PortfolioTracker() {
     avgPrice: "",
   });
 
+  const applyData = (data, fallbackAccounts = ["계좌1"]) => {
+    setHoldings(data?.holdings || []);
+    setAccounts(data?.accounts && data.accounts.length ? data.accounts : fallbackAccounts);
+    setCashMap(data?.cashMap || { [fallbackAccounts[0]]: 0 });
+    setOtherMap(data?.otherMap || { [fallbackAccounts[0]]: 0 });
+    setForm((f) => ({ ...f, account: (data?.accounts && data.accounts[0]) || fallbackAccounts[0] }));
+  };
+
+  const loadDemo = () => {
+    applyData(DEMO_DATA, DEMO_DATA.accounts);
+    setMode("demo");
+  };
+
   useEffect(() => {
     (async () => {
-      const { data, ok } = await loadFromDB();
-      if (!ok) setStorageBroken(true);
-      if (data) {
-        setHoldings(data.holdings || []);
-        setAccounts(data.accounts && data.accounts.length ? data.accounts : ["계좌1"]);
-        setCashMap(data.cashMap || { "계좌1": 0 });
-        setOtherMap(data.otherMap || { "계좌1": 0 });
-        if (data.accounts && data.accounts.length) {
-          setForm((f) => ({ ...f, account: data.accounts[0] }));
+      const savedToken = localStorage.getItem(OWNER_TOKEN_KEY);
+      if (savedToken) {
+        const { data, ok } = await loadFromDB(savedToken);
+        if (ok) {
+          setToken(savedToken);
+          setMode("owner");
+          applyData(data);
+        } else {
+          localStorage.removeItem(OWNER_TOKEN_KEY);
+          loadDemo();
         }
+      } else {
+        loadDemo();
       }
       setLoaded(true);
     })();
   }, []);
 
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || mode !== "owner") return;
     const timer = setTimeout(async () => {
-      const ok = await saveToDB({ holdings, accounts, cashMap, otherMap });
+      const ok = await saveToDB({ holdings, accounts, cashMap, otherMap }, token);
       setStorageBroken(!ok);
       if (ok) {
         setSaveStatus("저장됨");
@@ -162,7 +198,31 @@ export default function PortfolioTracker() {
       }
     }, 800);
     return () => clearTimeout(timer);
-  }, [holdings, accounts, cashMap, otherMap, loaded]);
+  }, [holdings, accounts, cashMap, otherMap, loaded, mode, token]);
+
+  const handleLogin = async () => {
+    if (!loginInput.trim()) return;
+    setLoggingIn(true);
+    setLoginError("");
+    const { data, ok } = await loadFromDB(loginInput.trim());
+    if (ok) {
+      localStorage.setItem(OWNER_TOKEN_KEY, loginInput.trim());
+      setToken(loginInput.trim());
+      setMode("owner");
+      applyData(data);
+      setLoginOpen(false);
+      setLoginInput("");
+    } else {
+      setLoginError("비밀번호가 올바르지 않거나 서버 연결에 실패했어요.");
+    }
+    setLoggingIn(false);
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem(OWNER_TOKEN_KEY);
+    setToken(null);
+    loadDemo();
+  };
 
   const addAccount = () => {
     const name = newAccountName.trim();
@@ -295,28 +355,83 @@ export default function PortfolioTracker() {
       {/* 헤더 */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-lg font-semibold text-slate-100">내 포트폴리오</h1>
+          <h1 className="text-lg font-semibold text-slate-100 flex items-center gap-2">
+            내 포트폴리오
+            <span
+              className={`text-[11px] font-normal px-2 py-0.5 rounded-full ${
+                mode === "owner" ? "bg-emerald-900/50 text-emerald-400" : "bg-slate-800 text-slate-400"
+              }`}
+            >
+              {mode === "owner" ? "개인 화면" : "데모"}
+            </span>
+          </h1>
           <p className="text-xs text-slate-500 mt-0.5">
             {lastUpdated ? `마지막 갱신 ${lastUpdated.toLocaleTimeString("ko-KR")}` : "종목을 추가하고 새로고침을 눌러보세요"}
             {saveStatus && <span className="ml-2 text-emerald-500">{saveStatus}</span>}
           </p>
         </div>
-        <button
-          onClick={refreshAll}
-          disabled={refreshing || holdings.length === 0}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-600 text-white text-sm font-medium transition"
-        >
-          <RefreshCw size={16} className={refreshing ? "animate-spin" : ""} />
-          {refreshing ? "실시간 시세 조회 중..." : "새로고침 (실시간 시세)"}
-        </button>
+        <div className="flex items-center gap-2">
+          {mode === "owner" ? (
+            <button
+              onClick={handleLogout}
+              className="px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 text-sm transition"
+            >
+              로그아웃
+            </button>
+          ) : (
+            <button
+              onClick={() => setLoginOpen((v) => !v)}
+              className="px-3 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-400 hover:text-slate-200 text-sm transition"
+            >
+              소유자 로그인
+            </button>
+          )}
+          <button
+            onClick={refreshAll}
+            disabled={refreshing || holdings.length === 0}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-800 disabled:text-slate-600 text-white text-sm font-medium transition"
+          >
+            <RefreshCw size={16} className={refreshing ? "animate-spin" : ""} />
+            {refreshing ? "실시간 시세 조회 중..." : "새로고침 (실시간 시세)"}
+          </button>
+        </div>
       </div>
 
-      {storageBroken && (
+      {loginOpen && mode !== "owner" && (
+        <div className="bg-slate-900 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center gap-2">
+          <input
+            type="password"
+            value={loginInput}
+            onChange={(e) => setLoginInput(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleLogin()}
+            placeholder="비밀번호 (ACCESS_TOKEN)"
+            className="bg-slate-800 text-slate-100 text-sm rounded-lg px-3 py-2 outline-none w-full sm:w-64"
+            autoFocus
+          />
+          <button
+            onClick={handleLogin}
+            disabled={loggingIn}
+            className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-700 text-white text-sm transition"
+          >
+            {loggingIn ? "확인 중..." : "로그인"}
+          </button>
+          {loginError && <span className="text-xs text-red-400">{loginError}</span>}
+        </div>
+      )}
+
+      {mode === "demo" && !loginOpen && (
+        <div className="flex items-start gap-2 bg-slate-900 text-slate-500 text-xs rounded-lg p-3">
+          <AlertCircle size={14} className="mt-0.5 shrink-0" />
+          <span>지금 보고 계신 화면은 예시 데이터로 채워진 데모예요. 실제로 저장되지 않으니 마음껏 눌러보셔도 돼요.</span>
+        </div>
+      )}
+
+      {storageBroken && mode === "owner" && (
         <div className="flex items-start gap-2 bg-amber-950/40 border border-amber-800/50 text-amber-300 text-xs rounded-lg p-3">
           <AlertCircle size={14} className="mt-0.5 shrink-0" />
           <span>
             서버 데이터베이스에 연결하지 못했어요. claude.ai 미리보기에서는 /api 라우트가 동작하지 않아 항상 이렇게 뜨는 게 정상이에요.
-            Vercel에 배포하고 KV 데이터베이스를 연결하면 해결됩니다 (아래 배포 안내 참고). 지금 입력한 내용은 이 화면을 벗어나면 사라져요.
+            Vercel에 배포하고 KV 데이터베이스를 연결하면 해결됩니다. 지금 입력한 내용은 이 화면을 벗어나면 사라져요.
           </span>
         </div>
       )}

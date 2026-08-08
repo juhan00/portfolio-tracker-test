@@ -9,10 +9,15 @@ const KEY = "portfolio-data";
 
 function checkAuth(req, res) {
   const required = process.env.ACCESS_TOKEN;
-  if (!required) return true; // 토큰을 설정하지 않았으면 인증 생략 (개인 배포용 기본값)
+  if (!required) {
+    res.status(500).json({
+      error: "서버에 ACCESS_TOKEN 환경변수가 설정되어 있지 않습니다. Vercel 프로젝트 설정에서 추가한 뒤 재배포하세요.",
+    });
+    return false;
+  }
   const given = req.headers["x-access-token"];
   if (given !== required) {
-    res.status(401).json({ error: "인증 실패: 토큰이 올바르지 않습니다" });
+    res.status(401).json({ error: "인증 실패: 비밀번호가 올바르지 않습니다" });
     return false;
   }
   return true;
